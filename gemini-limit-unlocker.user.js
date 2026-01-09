@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Gemini 解除字数限制锁死 + 智能清空版 (高性能优化版)
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  解决Gemini自拦截限制字数问题，高性能零延迟，自动识别用户操作与系统截断
 // @author       Azikaban & Gemini AI
-// @match        *://gemini.google.com/*
+// @match        *://gemini.9e.lv/gemini.google.com/*
 // @grant        none
 // @run-at       document-start
 // @license      MIT
@@ -44,14 +44,13 @@
     'use strict';
 
     // 1. 区分 "用户手动删除" 与 "系统自动截断"
-    // 只有用户没有操作键盘，且文本被大段删除时，才判定为系统拦截
+    // 判定逻辑升级：不仅监听键盘，还监听鼠标点击、粘贴、IME输入等
     let lastUserActionTs = 0;
     const updateActionTs = () => { lastUserActionTs = Date.now(); };
 
-    window.addEventListener('keydown', (e) => {
-        if (e.key === 'Backspace' || e.key === 'Delete') updateActionTs();
-    }, true);
-    window.addEventListener('cut', updateActionTs, true);
+    // 扩充事件监听列表，修复 "鼠标粘贴" 和 "中文输入" 可能导致的误判
+    const userEvents = ['keydown', 'mousedown', 'paste', 'cut', 'compositionstart'];
+    userEvents.forEach(evt => window.addEventListener(evt, updateActionTs, true));
 
     // 2. 核心劫持
     const originalDefineProperty = Object.defineProperty;
@@ -62,12 +61,21 @@
             return originalDefineProperty.apply(this, arguments);
         }
 
-        // 劫持insertAt，仅用于维护长度计数，O(1) 复杂度
+        // 辅助函数：安全初始化 shadowLen (鲁棒性修复)
+        // 防止脚本注入较晚（编辑器已有文本），this.__shadowLen 为 undefined 导致计算错误
+        const initShadowLen = (ctx) => {
+            if (typeof ctx.__shadowLen !== 'number') {
+                // 尝试获取现有文本长度作为基准（仅初始化时读取一次 DOM/Proxy，不影响后续性能）
+                // 如果读取失败，则安全回退到 0
+                ctx.__shadowLen = (ctx.text && typeof ctx.text.length === 'number') ? ctx.text.length : 0;
+            }
+        };
+
+        // 劫持 insertAt (插入)
         if (prop === 'insertAt' && descriptor.value) {
             const originalInsert = descriptor.value;
             descriptor.value = function(index, text, formatting) {
-                // 初始化影子长度
-                if (typeof this.__shadowLen !== 'number') this.__shadowLen = 0;
+                initShadowLen(this);
 
                 // 更新长度：纯数字计算，极大提升长文本性能
                 if (typeof text === 'string') {
@@ -84,15 +92,15 @@
         if (prop === 'deleteAt' && descriptor.value) {
             const originalDelete = descriptor.value;
             descriptor.value = function(index, length) {
-                const currentLen = this.__shadowLen || 0;
+                initShadowLen(this);
+                const currentLen = this.__shadowLen;
 
                 // --- 智能放行逻辑 ---
                 
                 // 1. 清空/全选删除：从索引 0 开始删，视为合法操作
-                // 这完美覆盖了：回车发送清空、点击发送按钮清空、Ctrl+A删除
                 const isClear = (index === 0);
 
-                // 2. 用户主动删除：用户刚按了删除键，放行
+                // 2. 用户主动操作 (扩充了 paste/mousedown 等判定，阈值设为 200ms)
                 const isUserAction = (Date.now() - lastUserActionTs < 200);
 
                 // 3. 打字修补：只删 1-2 个字，放行
@@ -105,9 +113,9 @@
 
                 // --- 拦截逻辑 ---
                 
-                // 系统自动截断特征：不是从头删，也不是用户按键，且删除范围触及了文末
+                // 系统自动截断特征：不是从头删，也不是用户操作，且涉及文末
                 if ((index + length) >= currentLen) {
-                    console.warn(`🛡️ 已拦截 Gemini 自动截断 (Index: ${index}, Len: ${length})`);
+                    console.warn(`🛡️ 已拦截 Gemini 自动截断 (Index: ${index}, Len: ${length}, Total: ${currentLen})`);
                     return; // ⛔ 直接阻止删除
                 }
 
@@ -120,5 +128,5 @@
         return originalDefineProperty.apply(this, arguments);
     };
 
-    console.log("🚀 Gemini 字数限制解锁 (高性能版) 已注入");
+    console.log("🚀 Gemini 字数限制解锁 (v1.2 高性能稳健版) 已注入");
 })();
